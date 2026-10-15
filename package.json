@@ -282,6 +282,11 @@
           "description": "%configuration.disableColorCustomizations.description%",
           "type": "boolean",
           "default": false
+        },
+        "vscode_vibrancy.autoReapplyAfterUpdate": {
+          "description": "%configuration.autoReapplyAfterUpdate.description%",
+          "type": "boolean",
+          "default": false
         }
       }
     }

@@ -77,7 +77,7 @@ Some editors may present a [persistent warning](#️-your-vscode-installation-ap
 
 3. Restart VSCode when prompted.
 
-Each time VS Code is updated, please re-enable Vibrancy using the same steps. If you're experiencing issues, please check the [FAQs](#faqs).
+Each VS Code update replaces the files Vibrancy changes. On the first launch after an update, Vibrancy offers to re-apply itself: click **Re-apply**, then restart. To skip the question, click **Always re-apply automatically** or turn on [`vscode_vibrancy.autoReapplyAfterUpdate`](#re-apply-after-updates-vscode_vibrancyautoreapplyafterupdate). If you're experiencing issues, please check the [FAQs](#faqs).
 
 # 🪟 Windows 10/11 notes
 
@@ -193,6 +193,14 @@ Disable fixes to Default Dark and Default Light themes for non-VSCode editors li
 #### Disable Color Customizations (`vscode_vibrancy.disableColorCustomizations`)
 
 Prevent Vibrancy from modifying `workbench.colorCustomizations` which is used to make some elements like the terminal vibrant. Enable this if you want to manage color customizations yourself, or if you use a custom CSS theme that handles its own background colors and transparency. When enabled mid-session, any previously written vibrancy colors will be restored to their original values.
+
+*boolean, default is false*
+
+#### Re-apply after updates (`vscode_vibrancy.autoReapplyAfterUpdate`)
+
+Re-apply Vibrancy without asking when a VS Code update removes it. You'll still be asked to restart. Off by default, so you're asked first. The prompt's **Always re-apply automatically** button turns this on.
+
+If VS Code is installed system-wide (for example in `C:\Program Files`), an administrator prompt (UAC on Windows) will appear on the first launch after each update. VS Code's User Installer puts it in your user folder instead, where no prompt is needed.
 
 *boolean, default is false*
 

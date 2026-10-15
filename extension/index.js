@@ -37,6 +37,7 @@ const { readColorCustomizations } = require('./jsonc-settings');
 const { resolveInstallPaths, rebaseInstallPaths, findRuntimeDirs } = require('./install-paths');
 const { extensionsDirOf, readRecord, writeRecord, removeRecord } = require('./install-records');
 const patchSafety = require('./patch-safety');
+const reapply = require('./reapply-after-update');
 
 /**
  * @type {(info: string) => string}
@@ -744,6 +745,69 @@ function activate(context) {
     if (msg) await runExclusive(() => Update());
   }
 
+  /**
+   * The build of an install that an editor update unpatched while Vibrancy is
+   * still enabled in it, or null. See reapply-after-update.js.
+   *
+   * Synchronous, so activate() knows before it decides on the extension-update
+   * prompt, which this replaces.
+   */
+  function findPatchRemovedByUpdate() {
+    if (testMode || osType === 'unknown') return null;
+    // A NixOS mirror has its own check for a rebuilt store path.
+    if (usingMirror || launchedFromMirror) return null;
+    if (!readRecord(getConfigDir('vscode-vibrancy-continued'), thisInstall())) return null;
+    let js;
+    try {
+      js = require('fs').readFileSync(JSFile, 'utf-8');
+    } catch {
+      return null;
+    }
+    if (removeJSMarkers(js).hadMarkers) return null;
+    return reapply.buildKey(JSFile, js);
+  }
+
+  /**
+   * Put Vibrancy back after an editor update removed it: without asking when
+   * autoReapplyAfterUpdate is on, otherwise by offering to. Once per build,
+   * however many windows activate.
+   */
+  async function reapplyAfterUpdate(build) {
+    if (!reapply.claimBuild(getConfigDir('vscode-vibrancy-continued'), thisInstall().extensionsDir, build)) return;
+
+    const needsElevation = checkNeedsElevation(appDir);
+    // Snap, read-only and Nix store installs: nothing here can write to them.
+    if (typeof needsElevation === 'string') return;
+
+    const config = vscode.workspace.getConfiguration('vscode_vibrancy');
+    const { packageJSON } = context.extension;
+    // Either route has already said administrator permission is needed (the
+    // setting's description, or the prompt below), so Update goes straight to
+    // the system's own prompt instead of asking a second time.
+    const reapplyNow = () => runExclusive(() => Update({ elevationConfirmed: true }));
+
+    if (reapply.shouldReapplyAutomatically(packageJSON, config.get(reapply.SETTING_KEY))) {
+      await reapplyNow();
+      return;
+    }
+
+    const prompt = reapply.promptFor({
+      appName: vscode.env.appName,
+      offered: reapply.isAutoReapplyOffered(packageJSON),
+      needsElevation: needsElevation === true,
+      localize,
+    });
+    const choice = await vscode.window.showInformationMessage(
+      prompt.message,
+      ...[prompt.reapply, prompt.always].filter(Boolean),
+    );
+    if (!choice) return;
+    if (prompt.always && choice.title === prompt.always.title) {
+      await config.update(reapply.SETTING_KEY, true, vscode.ConfigurationTarget.Global);
+    }
+    await reapplyNow();
+  }
+
   async function buildMainJS(baseJS) {
     const config = vscode.workspace.getConfiguration("vscode_vibrancy");
     const currentTheme = getCurrentTheme(config);
@@ -1412,8 +1476,12 @@ function activate(context) {
    * Check if elevation is needed and prompt the user for permission.
    * Returns the resolved elevation state (true/false), or null if the user
    * cancelled or the operation should be aborted (e.g. Snap).
+   *
+   * @param {boolean} forceElevation
+   * @param {{ confirmed?: boolean }} [options] - confirmed: the caller already
+   *   told the user administrator permission is needed, so skip asking again
    */
-  async function resolveElevation(forceElevation) {
+  async function resolveElevation(forceElevation, { confirmed = false } = {}) {
     if (testMode) return false;
     // In mirror mode all writes land under $HOME — never elevate. The probe
     // must not run against installPaths.appDir either: the mirror may not exist yet
@@ -1445,13 +1513,15 @@ function activate(context) {
         return null;
       }
 
-      const choice = await vscode.window.showWarningMessage(
-        localize('messages.elevationRequired'),
-        { title: localize('messages.elevationYes') },
-        { title: localize('messages.elevationNo') }
-      );
-      if (!choice || choice.title === localize('messages.elevationNo')) {
-        return null;
+      if (!confirmed) {
+        const choice = await vscode.window.showWarningMessage(
+          localize('messages.elevationRequired'),
+          { title: localize('messages.elevationYes') },
+          { title: localize('messages.elevationNo') }
+        );
+        if (!choice || choice.title === localize('messages.elevationNo')) {
+          return null;
+        }
       }
     }
 
@@ -1771,8 +1841,11 @@ function activate(context) {
     }
   }
 
-  async function Update() {
-    const needsElevation = await resolveElevation(false);
+  /**
+   * @param {{ elevationConfirmed?: boolean }} [options] - see resolveElevation
+   */
+  async function Update({ elevationConfirmed = false } = {}) {
+    const needsElevation = await resolveElevation(false, { confirmed: elevationConfirmed });
     if (needsElevation === null) return;
 
     // Single writer for both uninstall + install — one elevation prompt
@@ -1848,6 +1921,11 @@ function activate(context) {
     updateMsg = "messages.firstload"
   }
 
+  // Worked out before the extension-update prompt, which it replaces: an editor
+  // update that removed the patch needs the same Update() that prompt's button
+  // runs, and one prompt asking for it is enough.
+  const removedByUpdate = findPatchRemovedByUpdate();
+
   // Check if the current version is a minor update from the last version
   if (checkRuntimeUpdate(currentVersion, lastVersion)) {
     if (testMode) {
@@ -1863,7 +1941,7 @@ function activate(context) {
       }).catch((err) => {
         writeTestSignal('error', String(err && err.message || err));
       });
-    } else {
+    } else if (!removedByUpdate) {
       vscode.window.showInformationMessage(localize(updateMsg), { title: localize('messages.installIde') })
         .then(async (msg) => {
           if (msg) {
@@ -1873,6 +1951,11 @@ function activate(context) {
     }
     // Update the global state with the current version
     context.globalState.update('lastVersion', currentVersion);
+  }
+
+  if (removedByUpdate) {
+    reapplyAfterUpdate(removedByUpdate)
+      .catch((err) => console.error('Vibrancy: failed to re-apply after an editor update:', err));
   }
 
   // Test harness can request an uninstall by creating a test-uninstall file
@@ -1918,7 +2001,7 @@ function activate(context) {
   vscode.workspace.onDidChangeConfiguration(() => {
     if (operationInProgress) return;
     const newConfig = vscode.workspace.getConfiguration("vscode_vibrancy");
-    if (!deepEqual(lastConfig, newConfig)) {
+    if (!deepEqual(reapply.withoutAutoReapply(lastConfig), reapply.withoutAutoReapply(newConfig))) {
       lastConfig = newConfig;
       vscode.window.showInformationMessage(localize('messages.configupdate'), { title: localize('messages.reloadIde') })
       .then(async (msg) => {

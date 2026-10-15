@@ -66,7 +66,9 @@ function makeInstall({ htmlRelPath = SANDBOX_HTML, mainImpl = false } = {}) {
   };
 }
 
-function activate({ settings = {}, appName } = {}) {
+function activate({
+  settings = {}, appName, responses, globalState, packageJSON = require('../../package.json'),
+} = {}) {
   vscode.__reset({
     appName,
     appRoot: appDir && path.dirname(appDir),
@@ -76,9 +78,10 @@ function activate({ settings = {}, appName } = {}) {
       'workbench.colorTheme': 'Default Dark+',
       ...settings,
     },
+    responses,
     // Pre-seeded so activate() doesn't offer a first-run install or kick off an
     // update of its own; each test drives the commands it wants explicitly.
-    globalState: { lastVersion: require('../../package.json').version },
+    globalState: { lastVersion: require('../../package.json').version, ...globalState },
   });
 
   const context = {
@@ -89,11 +92,20 @@ function activate({ settings = {}, appName } = {}) {
       get: (k) => vscode.__state.globalState.get(k),
       update: async (k, v) => { vscode.__state.globalState.set(k, v); },
     },
-    extension: { packageJSON: require('../../package.json') },
+    extension: { packageJSON },
   };
 
   extension.activate(context);
   return context;
+}
+
+/** Wait for something activate() started without awaiting. */
+async function until(condition, timeout = 5000) {
+  const deadline = Date.now() + timeout;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error('timed out waiting');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
 
 const run = (command) => vscode.__state.commands.get(command)();
@@ -376,6 +388,161 @@ describe('Reload', () => {
     // And exactly one set of markers — not one per update.
     expect(read(jsPath).match(/VSCODE-VIBRANCY-START/g)).toHaveLength(1);
     expect(fs.readdirSync(path.join(appDir, 'vscode-vibrancy-runtime-v6'))).toContain('index.cjs');
+  });
+});
+
+// --- an editor update removing the patch ---
+//
+// An update replaces the files Vibrancy patched while Vibrancy stays enabled.
+// The startup check used to compare only the extension's own version, which an
+// editor update leaves alone, so nothing noticed until the user remembered to
+// run Reload Vibrancy. See reapply-after-update.js.
+describe('after an editor update removed the patch', () => {
+  const runtimeDir = () => path.join(appDir, 'vscode-vibrancy-runtime-v6');
+
+  /**
+   * What an editor update does to the install: fresh copies of the patched
+   * files, and no runtime or backups beside them. `build` stands in for a new
+   * release, whose main.js differs from the last one's.
+   */
+  function updateEditor({ jsPath, htmlPath }, build = 1) {
+    fs.writeFileSync(jsPath, `${read(path.join(FIXTURES, 'main-merged.js'))}\n// build ${build}\n`);
+    fs.rmSync(`${jsPath}.vibrancy-orig`, { force: true });
+    fs.copyFileSync(path.join(FIXTURES, 'workbench.html'), htmlPath);
+    fs.rmSync(runtimeDir(), { recursive: true, force: true });
+  }
+
+  async function installThenUpdate() {
+    const paths = makeInstall();
+    activate();
+    await run('extension.installVibrancy');
+    updateEditor(paths);
+    return paths;
+  }
+
+  const prompts = () => vscode.__state.messages.filter((m) => m.message.startsWith(
+    localize('messages.reapplyAfterUpdate').replace(/%1/g, 'Visual Studio Code'),
+  ));
+  const reapplied = () => vscode.__state.messages.some((m) => m.message === localize('messages.enabled'));
+  const errors = () => vscode.__state.messages.filter((m) => m.kind === 'error');
+  const settled = () => new Promise((resolve) => setTimeout(resolve, 100));
+  const AUTO = 'vscode_vibrancy.autoReapplyAfterUpdate';
+
+  it('offers to re-apply, and Re-apply patches the new files', async () => {
+    const { jsPath } = await installThenUpdate();
+
+    activate({ responses: [{ title: localize('messages.reapply') }] });
+    await until(reapplied);
+
+    expect(prompts()).toHaveLength(1);
+    expect(read(jsPath)).toContain('VSCODE-VIBRANCY-START');
+    expect(fs.readdirSync(runtimeDir())).toContain('index.cjs');
+    expect(errors()).toEqual([]);
+  });
+
+  it('asks once per build, however many windows activate', async () => {
+    const paths = await installThenUpdate();
+
+    activate(); // dismissed
+    await settled();
+    expect(prompts()).toHaveLength(1);
+
+    // A second window, or a restart, on the same build.
+    activate();
+    await settled();
+    expect(prompts()).toHaveLength(0);
+
+    // The next update is a new build.
+    updateEditor(paths, 2);
+    activate();
+    await settled();
+    expect(prompts()).toHaveLength(1);
+  });
+
+  it('stays quiet while the patch is intact', async () => {
+    makeInstall();
+    activate();
+    await run('extension.installVibrancy');
+
+    activate();
+    await settled();
+
+    expect(prompts()).toHaveLength(0);
+  });
+
+  it('stays quiet when Vibrancy was disabled before the update', async () => {
+    const paths = makeInstall();
+    activate();
+    await run('extension.installVibrancy');
+    await run('extension.uninstallVibrancy');
+    updateEditor(paths);
+
+    activate();
+    await settled();
+
+    expect(prompts()).toHaveLength(0);
+  });
+
+  it('takes the place of the extension-update prompt rather than adding to it', async () => {
+    // Both at once: the extension updated along with the editor. Either
+    // prompt's button runs the same Update().
+    await installThenUpdate();
+
+    activate({ globalState: { lastVersion: '0.0.0' } });
+    await settled();
+
+    expect(prompts()).toHaveLength(1);
+    expect(vscode.__state.messages.some((m) => m.message === localize('messages.updateNeeded'))).toBe(false);
+  });
+
+  it('turns automatic re-apply on from the prompt, and re-applies', async () => {
+    const { jsPath } = await installThenUpdate();
+
+    activate({ responses: [{ title: localize('messages.reapplyAlways') }] });
+    await until(reapplied);
+
+    expect(vscode.__state.settings[AUTO]).toBe(true);
+    expect(read(jsPath)).toContain('VSCODE-VIBRANCY-START');
+  });
+
+  it('re-applies without asking once automatic re-apply is on', async () => {
+    const { jsPath } = await installThenUpdate();
+
+    activate({ settings: { [AUTO]: true } });
+    await until(reapplied);
+
+    expect(prompts()).toHaveLength(0);
+    expect(read(jsPath)).toContain('VSCODE-VIBRANCY-START');
+    expect(errors()).toEqual([]);
+  });
+
+  describe('when package.json no longer contributes the setting', () => {
+    const withoutSetting = () => {
+      const copy = structuredClone(require('../../package.json'));
+      delete copy.contributes.configuration.properties[AUTO];
+      return copy;
+    };
+
+    it('offers only Re-apply', async () => {
+      await installThenUpdate();
+
+      activate({ packageJSON: withoutSetting() });
+      await settled();
+
+      expect(prompts()).toHaveLength(1);
+      expect(prompts()[0].options.map((o) => o.title)).toEqual([localize('messages.reapply')]);
+    });
+
+    it('ignores a value left in settings.json and still asks', async () => {
+      const { jsPath } = await installThenUpdate();
+      const unpatched = read(jsPath);
+
+      activate({ packageJSON: withoutSetting(), settings: { [AUTO]: true } });
+      await settled();
+
+      expect(prompts()).toHaveLength(1);
+      expect(read(jsPath)).toBe(unpatched);
+    });
   });
 });
 

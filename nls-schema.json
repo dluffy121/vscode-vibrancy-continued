@@ -124,6 +124,24 @@
     },
     "messages.applyToAllProfiles": {
       "type": "string"
+    },
+    "configuration.autoReapplyAfterUpdate.description": {
+      "type": "string"
+    },
+    "messages.reapplyAfterUpdate": {
+      "type": "string"
+    },
+    "messages.reapplyNeedsAdmin": {
+      "type": "string"
+    },
+    "messages.reapplyAutoAdminNote": {
+      "type": "string"
+    },
+    "messages.reapply": {
+      "type": "string"
+    },
+    "messages.reapplyAlways": {
+      "type": "string"
     }
   },
   "required": [
@@ -167,6 +185,12 @@
     "messages.htmlError",
     "messages.electronDeprecatedType",
     "messages.applyToAllProfiles",
-    "configuration.disableColorCustomizations.description"
+    "configuration.disableColorCustomizations.description",
+    "configuration.autoReapplyAfterUpdate.description",
+    "messages.reapplyAfterUpdate",
+    "messages.reapplyNeedsAdmin",
+    "messages.reapplyAutoAdminNote",
+    "messages.reapply",
+    "messages.reapplyAlways"
   ]
 }

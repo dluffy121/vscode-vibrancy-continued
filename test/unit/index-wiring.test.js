@@ -123,6 +123,43 @@ describe('Uninstall settings restore', () => {
   });
 });
 
+// --- the "config changed, reload?" prompt ---
+//
+// Turning autoReapplyAfterUpdate on changes nothing installed, and the
+// re-apply prompt's own "Always" button is one of the ways it gets turned on,
+// so it must not offer a reload. The comparison can't be driven from the
+// integration suite: the fake's configuration objects read settings live, so
+// the old and new snapshots there always compare equal.
+describe('config change prompt', () => {
+  it('ignores the automatic re-apply setting', () => {
+    expect(source).toContain(
+      'deepEqual(reapply.withoutAutoReapply(lastConfig), reapply.withoutAutoReapply(newConfig))',
+    );
+  });
+});
+
+// --- skipping the elevation confirmation ---
+//
+// The re-apply after an editor update has already said administrator
+// permission is needed, so it skips the "grant elevated access?" warning and
+// goes straight to the system's own prompt. Everything else, a manual Reload on
+// a system-wide install included, must still ask. The integration suite can't
+// reach this: its temp-dir install never needs elevation.
+describe('elevation confirmation', () => {
+  it('is only skipped when the caller says it already asked', () => {
+    const body = bodyOf('resolveElevation');
+    const guard = body.indexOf('if (!confirmed)');
+
+    expect(guard).toBeGreaterThan(-1);
+    expect(body.indexOf("localize('messages.elevationRequired')")).toBeGreaterThan(guard);
+  });
+
+  it('is skipped by the re-apply after an editor update, and by nothing else', () => {
+    expect(source.match(/elevationConfirmed: true/g) || []).toHaveLength(1);
+    expect(bodyOf('reapplyAfterUpdate')).toContain('Update({ elevationConfirmed: true })');
+  });
+});
+
 // --- install path resolution ---
 //
 // install-paths.js resolves the layout by probing the filesystem, and refuses
